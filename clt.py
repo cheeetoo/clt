@@ -45,6 +45,44 @@ class LocalDecoder(nn.Module):
         return out
 
 
+class InferenceCLT(nn.Module):
+    def __init__(
+        self,
+        n_layers: int,
+        d_model: int,
+        n_features: int,
+        bandwidth: float,
+    ):
+        super().__init__()
+        self.n_layers = n_layers
+        self.d_model = d_model
+        self.bandwidth = bandwidth
+        f_layer = n_features // n_layers
+        self.w_e = nn.Parameter(torch.empty(n_layers, d_model, f_layer))
+
+        self.d = nn.ModuleList(
+            [LocalDecoder(i, n_layers, f_layer, d_model) for i in range(n_layers)]
+        )
+        self.t = nn.Parameter(torch.empty((n_layers, f_layer)))
+
+    @classmethod
+    def from_pretrained(cls, sd):
+        model = cls(sd["n_layers"], sd["d_model"], sd["n_features"], sd["bandwidth"])
+        model.load_state_dict(sd["model_state"])
+        model.eval()
+        return model
+
+    def forward(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        T, L, _ = x.shape
+        h = einsum(self.w_e, x, "l d f, t l d -> t l f")
+        acts: Tensor = JumpReLU.apply(h, torch.exp(self.t), self.bandwidth)  # type: ignore
+        x_hat = acts.new_zeros(T, L, self.d_model)
+
+        for i, dec in enumerate(self.d):
+            x_hat[:, i:] += dec(acts[:, i])
+        return h, acts, x_hat
+
+
 class FeatureParallelCLT(nn.Module):
     def __init__(
         self,
@@ -59,6 +97,7 @@ class FeatureParallelCLT(nn.Module):
         super().__init__()
         self.n_layers = n_layers
         self.d_model = d_model
+        self.n_features = n_features
         self.bandwidth = bandwidth
         self.lambda_p = lambda_p
         self.c = c
@@ -79,23 +118,16 @@ class FeatureParallelCLT(nn.Module):
 
         self.t = nn.Parameter(torch.full((n_layers, f_local), threshold))
 
-    def encode(self, x: Tensor) -> tuple[Tensor, Tensor]:
+    def forward(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        T, L, _ = x.shape
+
         h = einsum(self.w_e, x, "l d f, t l d -> t l f")
         acts: Tensor = JumpReLU.apply(h, torch.exp(self.t), self.bandwidth)  # type: ignore
-        return h, acts
 
-    def decode(self, acts: Tensor) -> Tensor:
-        T, L, _ = acts.shape
         x_hat = acts.new_zeros(T, L, self.d_model)
 
         for i, dec in enumerate(self.d):
             x_hat[:, i:] += dec(acts[:, i])
-
-        return x_hat
-
-    def forward(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        h, acts = self.encode(x)
-        x_hat = self.decode(acts)
 
         handle = dist.all_reduce(x_hat, op=dist.ReduceOp.SUM, async_op=True)
         handle.wait()  # type: ignore

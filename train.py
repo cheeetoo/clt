@@ -40,7 +40,7 @@ def preload_next(iter_loader, stream, world):
     return pre_super, post_super
 
 
-def save_single_device(model, world, rank, out_path):
+def save_single_device(model: FeatureParallelCLT, world, rank, out_path):
     full_sd = {}
     for k, v in model.state_dict().items():
         if v.ndim == 0:
@@ -52,7 +52,16 @@ def save_single_device(model, world, rank, out_path):
             if rank == 0:
                 full_sd[k] = torch.cat(gathered, dim=-1).cpu()
     if rank == 0:
-        torch.save(full_sd, out_path)
+        torch.save(
+            {
+                "model_state": full_sd,
+                "n_layers": model.n_layers,
+                "d_model": model.d_model,
+                "n_features": model.n_features,
+                "bandwidth": model.bandwidth,
+            },
+            out_path,
+        )
 
 
 def main(args):
