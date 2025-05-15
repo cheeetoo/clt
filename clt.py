@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
+import torch.distributed as dist
 from einops import einsum, reduce, rearrange
 from math import sqrt
 
@@ -29,12 +30,10 @@ class JumpReLU(torch.autograd.Function):
         return x_grad, threshold_grad, None
 
 
-class DecoderLayer(nn.Module):
-    def __init__(self, idx: int, n_layers: int, n_features: int, d_model: int):
+class LocalDecoder(nn.Module):
+    def __init__(self, idx: int, n_layers: int, f_local: int, d_model: int):
         super().__init__()
-        self.w = nn.Parameter(
-            torch.empty(n_layers - idx, n_features // n_layers, d_model)
-        )
+        self.w = nn.Parameter(torch.empty(n_layers - idx, f_local, d_model))
         nn.init.uniform_(
             self.w.data,
             -1 / sqrt(n_layers * d_model),
@@ -46,7 +45,7 @@ class DecoderLayer(nn.Module):
         return out
 
 
-class CLT(nn.Module):
+class FeatureParallelCLT(nn.Module):
     def __init__(
         self,
         n_layers: int,
@@ -64,14 +63,21 @@ class CLT(nn.Module):
         self.lambda_p = lambda_p
         self.c = c
 
-        self.w_e = nn.Parameter(torch.empty(n_layers, d_model, n_features // n_layers))
+        self.rank = dist.get_rank()
+        self.world = dist.get_world_size()
+
+        f_layer = n_features // n_layers
+        f_local = f_layer // self.world
+        self.f_local = f_local
+
+        self.w_e = nn.Parameter(torch.empty(n_layers, d_model, f_local))
         nn.init.uniform_(self.w_e.data, -1 / sqrt(n_features), 1 / sqrt(n_features))
 
         self.d = nn.ModuleList(
-            [DecoderLayer(i, n_layers, n_features, d_model) for i in range(n_layers)]
+            [LocalDecoder(i, n_layers, f_local, d_model) for i in range(n_layers)]
         )
 
-        self.t = nn.Parameter(torch.full((n_layers, n_features // n_layers), threshold))
+        self.t = nn.Parameter(torch.full((n_layers, f_local), threshold))
 
     def encode(self, x: Tensor) -> tuple[Tensor, Tensor]:
         h = einsum(self.w_e, x, "l d f, t l d -> t l f")
@@ -90,6 +96,10 @@ class CLT(nn.Module):
     def forward(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         h, acts = self.encode(x)
         x_hat = self.decode(acts)
+
+        handle = dist.all_reduce(x_hat, op=dist.ReduceOp.SUM, async_op=True)
+        handle.wait()  # type: ignore
+
         return h, acts, x_hat
 
     def get_loss(
