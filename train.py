@@ -2,6 +2,7 @@ import os
 import argparse
 
 import torch
+from torch import Tensor
 import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.amp.grad_scaler import GradScaler
@@ -20,21 +21,22 @@ def init_distributed() -> int:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--bin-path", type=str, default="acts.bin")
-    parser.add_argument("--meta-path", type=str, defualt="acts_meta.pt")
+    parser.add_argument("--bin_path", type=str, default="acts.bin")
+    parser.add_argument("--meta_path", type=str, default="acts_meta.pt")
     parser.add_argument("--bs", type=int, default=32)
     parser.add_argument("--features", type=int, default=300_000_000)
     parser.add_argument("--bandwidth", type=float, default=1.0)
     parser.add_argument("--threshold", type=float, default=0.03)
-    parser.add_argument("--lambda-p", type=float, default=3e-6)
-    parser.add_argument("--lambda-s", type=float, default=10.0)
+    parser.add_argument("--lambda_p", type=float, default=3e-6)
+    parser.add_argument("--lambda_s", type=float, default=10.0)
     parser.add_argument("--c", type=float, default=0.1)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--epochs", type=int, default=1)
     args = parser.parse_args()
 
     rank = init_distributed()
-    device = torch.device("cuda")
+    world = dist.get_world_size()
+    device = torch.device("cuda", rank)
 
     dataset = CLTActivationDataset(args.bin_path, args.meta_path)
     sampler = DistributedSampler(dataset, shuffle=True)
@@ -53,16 +55,39 @@ def main():
     scaler = GradScaler()
     optim = torch.optim.Adam(model.parameters(), lr=args.lr)
 
+    stream_gather = torch.cuda.Stream()
+
+    def all_gather_batch(x: Tensor) -> Tensor:
+        T, *rest = x.shape
+        out = x.new_empty(world * T, *rest)
+        dist.all_gather_into_tensor(out, x)
+        return out
+
+    def preload_next(iter_loader, stream):
+        pre_cpu, post_cpu = next(iter_loader)
+        pre_gpu = pre_cpu.cuda(non_blocking=True)
+        post_gpu = post_cpu.cuda(non_blocking=True)
+
+        with torch.cuda.stream(stream):
+            pre_super = all_gather_batch(pre_gpu)
+            post_super = all_gather_batch(post_gpu)
+
+        return pre_super, post_super
+
     total_steps = args.epochs * len(loader)
 
     for epoch in range(args.epochs):
         sampler.set_epoch(epoch)
+        iter_loader = iter(loader)
 
-        for step, (pre, post) in enumerate(loader):
-            pre = pre.cuda(non_blocking=True)
-            post = post.cuda(non_blocking=True)
-            global_step = step * epoch * len(loader)
+        pre_next, post_next = preload_next(iter_loader, stream_gather)
+        for step in range(len(loader)):
+            torch.cuda.current_stream().wait_stream(stream_gather)
+            global_step = step + epoch * len(loader)
             lambda_s = args.lambda_s * global_step / total_steps
+
+            pre, post = pre_next, post_next
+            pre_next, post_next = preload_next(iter_loader, stream_gather)
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 h, acts, x_hat = model.forward(pre)
