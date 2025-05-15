@@ -87,7 +87,8 @@ def main():
             lambda_s = args.lambda_s * global_step / total_steps
 
             pre, post = pre_next, post_next
-            pre_next, post_next = preload_next(iter_loader, stream_gather)
+            if step < len(loader) - 1:
+                pre_next, post_next = preload_next(iter_loader, stream_gather)
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 h, acts, x_hat = model.forward(pre)

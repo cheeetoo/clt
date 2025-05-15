@@ -36,7 +36,7 @@ dataset = load_dataset(DATASET_NAME, DATASET_CONF, split="train", streaming=True
 dataloader = torch.utils.data.DataLoader(dataset, batch_size=BATCH_SIZE, num_workers=4)  # type: ignore
 
 for batch in tqdm(dataloader):
-    toks = model.to_tokens(batch["text"], truncate=True, prepend_bos=False)
+    toks = model.to_tokens(batch["text"], truncate=True)
     n_toks = toks.shape[0] * toks.shape[1]
 
     _, cache = model.run_with_cache(
