@@ -1,9 +1,11 @@
 import os
 import argparse
+from pathlib import Path
 
 import torch
 from torch import Tensor
 import torch.distributed as dist
+import torch.distributed.checkpoint as dcp
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.amp.grad_scaler import GradScaler
 
@@ -19,21 +21,41 @@ def init_distributed() -> int:
     return dist.get_rank()
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--bin_path", type=str, default="acts.bin")
-    parser.add_argument("--meta_path", type=str, default="acts_meta.pt")
-    parser.add_argument("--bs", type=int, default=32)
-    parser.add_argument("--features", type=int, default=300_000_000)
-    parser.add_argument("--bandwidth", type=float, default=1.0)
-    parser.add_argument("--threshold", type=float, default=0.03)
-    parser.add_argument("--lambda_p", type=float, default=3e-6)
-    parser.add_argument("--lambda_s", type=float, default=10.0)
-    parser.add_argument("--c", type=float, default=0.1)
-    parser.add_argument("--lr", type=float, default=2e-4)
-    parser.add_argument("--epochs", type=int, default=1)
-    args = parser.parse_args()
+def all_gather_batch(x: Tensor, world: int) -> Tensor:
+    T, *rest = x.shape
+    out = x.new_empty(world * T, *rest)
+    dist.all_gather_into_tensor(out, x)
+    return out
 
+
+def preload_next(iter_loader, stream, world):
+    pre_cpu, post_cpu = next(iter_loader)
+    pre_gpu = pre_cpu.cuda(non_blocking=True)
+    post_gpu = post_cpu.cuda(non_blocking=True)
+
+    with torch.cuda.stream(stream):
+        pre_super = all_gather_batch(pre_gpu, world)
+        post_super = all_gather_batch(post_gpu, world)
+
+    return pre_super, post_super
+
+
+def save_single_device(model, world, rank, out_path):
+    full_sd = {}
+    for k, v in model.state_dict().items():
+        if v.ndim == 0:
+            if rank == 0:
+                full_sd[k] = v.cpu()
+        else:
+            gathered = [torch.empty_like(v) for _ in range(world)]
+            dist.all_gather(gathered, v)
+            if rank == 0:
+                full_sd[k] = torch.cat(gathered, dim=-1).cpu()
+    if rank == 0:
+        torch.save(full_sd, out_path)
+
+
+def main(args):
     rank = init_distributed()
     world = dist.get_world_size()
     device = torch.device("cuda", rank)
@@ -57,30 +79,14 @@ def main():
 
     stream_gather = torch.cuda.Stream()
 
-    def all_gather_batch(x: Tensor) -> Tensor:
-        T, *rest = x.shape
-        out = x.new_empty(world * T, *rest)
-        dist.all_gather_into_tensor(out, x)
-        return out
-
-    def preload_next(iter_loader, stream):
-        pre_cpu, post_cpu = next(iter_loader)
-        pre_gpu = pre_cpu.cuda(non_blocking=True)
-        post_gpu = post_cpu.cuda(non_blocking=True)
-
-        with torch.cuda.stream(stream):
-            pre_super = all_gather_batch(pre_gpu)
-            post_super = all_gather_batch(post_gpu)
-
-        return pre_super, post_super
-
     total_steps = args.epochs * len(loader)
+    cpkt_future = None
 
     for epoch in range(args.epochs):
         sampler.set_epoch(epoch)
         iter_loader = iter(loader)
 
-        pre_next, post_next = preload_next(iter_loader, stream_gather)
+        pre_next, post_next = preload_next(iter_loader, stream_gather, world)
         for step in range(len(loader)):
             torch.cuda.current_stream().wait_stream(stream_gather)
             global_step = step + epoch * len(loader)
@@ -88,7 +94,7 @@ def main():
 
             pre, post = pre_next, post_next
             if step < len(loader) - 1:
-                pre_next, post_next = preload_next(iter_loader, stream_gather)
+                pre_next, post_next = preload_next(iter_loader, stream_gather, world)
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 h, acts, x_hat = model.forward(pre)
@@ -99,11 +105,45 @@ def main():
                 scaler.update()
                 optim.zero_grad()
 
+            if step % 10_000 == 0 and step != 0:
+                if cpkt_future:
+                    cpkt_future.result()
+                cpkt_dir = Path("checkpoints") / f"ep{epoch:04d}s{step:05d}"
+                cpkt_dir.mkdir(parents=True, exist_ok=True)
+                state_dict = {
+                    "epoch": torch.tensor(epoch).cuda(),
+                    "model": model,
+                    "optim": optim,
+                    "scaler": scaler,
+                }
+                cpkt_future = dcp.async_save(
+                    state_dict=state_dict, checkpoint_id=str(cpkt_dir)
+                )
+
         if rank == 0:
             print(f"Epoch {epoch} done; loss {loss.item():.4f}")  # type: ignore
 
+    if cpkt_future:
+        cpkt_future.result()
+    save_single_device(model, world, rank, args.out_path)
+
+    dist.barrier()
     dist.destroy_process_group()
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--bin_path", type=str, default="acts.bin")
+    parser.add_argument("--meta_path", type=str, default="acts_meta.pt")
+    parser.add_argument("--bs", type=int, default=32)
+    parser.add_argument("--features", type=int, default=300_000_000)
+    parser.add_argument("--bandwidth", type=float, default=1.0)
+    parser.add_argument("--threshold", type=float, default=0.03)
+    parser.add_argument("--lambda_p", type=float, default=3e-6)
+    parser.add_argument("--lambda_s", type=float, default=10.0)
+    parser.add_argument("--c", type=float, default=0.1)
+    parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--out_path", type=str, default="model.pt")
+    args = parser.parse_args()
+    main(args)
