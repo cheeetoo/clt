@@ -57,13 +57,13 @@ class InferenceCLT(nn.Module):
         self.n_layers = n_layers
         self.d_model = d_model
         self.bandwidth = bandwidth
-        f_layer = n_features // n_layers
-        self.w_e = nn.Parameter(torch.empty(n_layers, d_model, f_layer))
+        self.f_layer = n_features // n_layers
+        self.w_e = nn.Parameter(torch.empty(n_layers, d_model, self.f_layer))
 
         self.d = nn.ModuleList(
-            [LocalDecoder(i, n_layers, f_layer, d_model) for i in range(n_layers)]
+            [LocalDecoder(i, n_layers, self.f_layer, d_model) for i in range(n_layers)]
         )
-        self.t = nn.Parameter(torch.empty((n_layers, f_layer)))
+        self.t = nn.Parameter(torch.empty((n_layers, self.f_layer)))
 
     @classmethod
     def from_pretrained(cls, sd):
