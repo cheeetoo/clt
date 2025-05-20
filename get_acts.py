@@ -39,10 +39,12 @@ for batch in tqdm(dataloader):
     toks = model.to_tokens(batch["text"], truncate=True)
     n_toks = toks.shape[0] * toks.shape[1]
 
-    _, cache = model.run_with_cache(
-        toks, names_filter=lambda n: n.endswith("resid_mid") or n.endswith("mlp_out")
-    )
-    pre = torch.stack([cache["resid_mid", i] for i in range(n_layers)])
+    with torch.no_grad():
+        _, cache = model.run_with_cache(
+            toks,
+            names_filter=lambda n: n.endswith("normalized") or n.endswith("mlp_out"),
+        )
+    pre = torch.stack([cache["normalized", i, "ln2"] for i in range(n_layers)])
     post = torch.stack([cache["mlp_out", i] for i in range(n_layers)])
     pre = rearrange(pre, "l b t d -> (b t) l d")
     post = rearrange(post, "l b t d -> (b t) l d")
