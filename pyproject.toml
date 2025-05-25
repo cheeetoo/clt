@@ -9,4 +9,5 @@ dependencies = [
     "einops>=0.8.1",
     "torch>=2.7.0",
     "transformer-lens>=2.15.0",
+    "wandb>=0.19.11",
 ]

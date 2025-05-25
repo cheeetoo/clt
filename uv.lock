@@ -166,6 +166,7 @@ dependencies = [
     { name = "einops" },
     { name = "torch" },
     { name = "transformer-lens" },
+    { name = "wandb" },
 ]
 
 [package.metadata]
@@ -174,6 +175,7 @@ requires-dist = [
     { name = "einops", specifier = ">=0.8.1" },
     { name = "torch", specifier = ">=2.7.0" },
     { name = "transformer-lens", specifier = ">=2.15.0" },
+    { name = "wandb", specifier = ">=0.19.11" },
 ]
 
 [[package]]

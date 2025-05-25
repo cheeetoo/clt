@@ -2,6 +2,7 @@ import os
 import argparse
 from pathlib import Path
 
+import wandb
 import torch
 from torch import Tensor
 import torch.distributed as dist
@@ -80,6 +81,27 @@ def main(args):
     world = dist.get_world_size()
     device = torch.device("cuda", rank)
 
+    if rank == 0:
+        wandb.init(
+            project="clt-training",
+            config={
+                "model_name": args.model_name,
+                "dataset_name": args.dataset_name,
+                "dataset_conf": args.dataset_conf,
+                "n_toks": args.n_toks,
+                "batch_size": args.bs,
+                "features": args.features,
+                "bandwidth": args.bandwidth,
+                "threshold": args.threshold,
+                "lambda_p": args.lambda_p,
+                "lambda_s": args.lambda_s,
+                "c": args.c,
+                "lr": args.lr,
+                "epochs": args.epochs,
+                "world_size": world,
+            },
+        )
+
     dataset = StreamingActivationDataset(
         args.model_name,
         args.dataset_name,
@@ -124,6 +146,18 @@ def main(args):
 
             loss = train_step(model, pre, post, lambda_s, scaler, optim)
 
+            if rank == 0 and step % 100 == 0:
+                wandb.log(
+                    {
+                        "loss": loss,
+                        "lambda_s": lambda_s,
+                        "epoch": epoch,
+                        "step": step,
+                        "global_step": global_step,
+                        "lr": optim.param_groups[0]["lr"],
+                    }
+                )
+
             if step % 10_000 == 0 and step != 0:
                 if cpkt_future:
                     cpkt_future.result()
@@ -144,6 +178,9 @@ def main(args):
 
     dist.barrier()
     dist.destroy_process_group()
+
+    if rank == 0:
+        wandb.finish()
 
 
 if __name__ == "__main__":
