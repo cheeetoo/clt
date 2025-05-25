@@ -14,6 +14,7 @@ class StreamingActivationDataset(IterableDataset):
         dataset_conf: str,
         batch_size: int,
         n_tokens: int,
+        seq_len: int,
         device: str,
         dtype: torch.dtype = torch.bfloat16,
     ):
@@ -25,13 +26,15 @@ class StreamingActivationDataset(IterableDataset):
         self.model = HookedTransformer.from_pretrained(
             model_name, device=device, dtype=dtype
         )
-        self.model.cfg.n_ctx = self.model.cfg.n_ctx // 32
+        self.model.cfg.n_ctx = seq_len
         self.n_layers = self.model.cfg.n_layers
         self.d_model = self.model.cfg.d_model
 
-        dataset = load_dataset(
-            dataset_name, dataset_conf, split="train", streaming=True
-        ).shard(num_shards=dist.get_world_size(), index=dist.get_rank())
+        dataset = (
+            load_dataset(dataset_name, dataset_conf, split="train", streaming=True)
+            .shard(num_shards=dist.get_world_size(), index=dist.get_rank())
+            .filter(lambda ex: ex["text"].strip() != "")
+        )
 
         self.dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size)
 
@@ -41,27 +44,28 @@ class StreamingActivationDataset(IterableDataset):
     def __iter__(self):
         tokens_processed = 0
 
-        for batch in self.dataloader:
-            if tokens_processed >= self.n_tokens:
-                break
+        while tokens_processed < self.n_tokens:
+            for batch in self.dataloader:
+                if tokens_processed >= self.n_tokens:
+                    break
 
-            toks = self.model.to_tokens(batch["text"], truncate=True)
-            n_toks = toks.shape[0] * toks.shape[1]
+                toks = self.model.to_tokens(batch["text"], truncate=True)
+                n_toks = toks.shape[0] * toks.shape[1]
 
-            with torch.no_grad():
-                _, cache = self.model.run_with_cache(
-                    toks,
-                    names_filter=lambda n: n.endswith("normalized")
-                    or n.endswith("mlp_out"),
+                with torch.no_grad():
+                    _, cache = self.model.run_with_cache(
+                        toks,
+                        names_filter=lambda n: n.endswith("normalized")
+                        or n.endswith("mlp_out"),
+                    )
+
+                pre = torch.stack(
+                    [cache["normalized", i, "ln2"] for i in range(self.n_layers)]
                 )
+                post = torch.stack([cache["mlp_out", i] for i in range(self.n_layers)])
+                pre = rearrange(pre, "l b t d -> (b t) l d").to(self.dtype)
+                post = rearrange(post, "l b t d -> (b t) l d").to(self.dtype)
 
-            pre = torch.stack(
-                [cache["normalized", i, "ln2"] for i in range(self.n_layers)]
-            )
-            post = torch.stack([cache["mlp_out", i] for i in range(self.n_layers)])
-            pre = rearrange(pre, "l b t d -> (b t) l d").to(self.dtype)
-            post = rearrange(post, "l b t d -> (b t) l d").to(self.dtype)
+                tokens_processed += n_toks
 
-            tokens_processed += n_toks
-
-            yield pre, post
+                yield pre, post

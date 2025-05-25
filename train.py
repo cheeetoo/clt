@@ -9,6 +9,7 @@ import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from torch.utils.data import DataLoader
 from torch.amp.grad_scaler import GradScaler
+from tqdm import tqdm
 
 from clt import FeatureParallelCLT
 from data import StreamingActivationDataset
@@ -108,6 +109,7 @@ def main(args):
         args.dataset_conf,
         args.bs,
         args.n_toks // world,
+        args.seq_len,
         device,
         torch.bfloat16,
     )
@@ -131,6 +133,9 @@ def main(args):
     total_steps = args.epochs * len(dataset)
     cpkt_future = None
 
+    if rank == 0:
+        pbar = tqdm(total=total_steps, desc="Training", unit="step")
+
     for epoch in range(args.epochs):
         iter_loader = iter(loader)
 
@@ -146,17 +151,23 @@ def main(args):
 
             loss = train_step(model, pre, post, lambda_s, scaler, optim)
 
-            if rank == 0 and step % 100 == 0:
-                wandb.log(
-                    {
-                        "loss": loss,
-                        "lambda_s": lambda_s,
-                        "epoch": epoch,
-                        "step": step,
-                        "global_step": global_step,
-                        "lr": optim.param_groups[0]["lr"],
-                    }
+            # Update tqdm and WandB logging
+            if rank == 0:
+                pbar.update(1)
+                pbar.set_postfix(
+                    {"epoch": epoch + 1, "step": step + 1, "loss": f"{loss:.4f}"}
                 )
+                if step % 100 == 0:
+                    wandb.log(
+                        {
+                            "loss": loss,
+                            "lambda_s": lambda_s,
+                            "epoch": epoch,
+                            "step": step,
+                            "global_step": global_step,
+                            "lr": optim.param_groups[0]["lr"],
+                        }
+                    )
 
             if step % 10_000 == 0 and step != 0:
                 if cpkt_future:
@@ -180,6 +191,7 @@ def main(args):
     dist.destroy_process_group()
 
     if rank == 0:
+        pbar.close()
         wandb.finish()
 
 
@@ -198,6 +210,7 @@ if __name__ == "__main__":
     parser.add_argument("--c", type=float, default=0.1)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--epochs", type=int)
+    parser.add_argument("--seq_len", type=int)
     parser.add_argument("--out_path", type=str, default="model.pt")
     args = parser.parse_args()
     main(args)
