@@ -2,7 +2,7 @@ import torch
 from transformer_lens import HookedTransformer
 
 from clt import InferenceCLT
-from attribution import get_vals, build_graph
+from attribution import get_vals, build_graph, prune_graph, graph_stats
 
 MODEL_NAME = "Qwen/Qwen2.5-0.5B"
 PROMPT = "The Federal Bureau of Investigation (F"
@@ -25,3 +25,18 @@ G = build_graph(
     error=error,
     resid_nodes=resid_nodes,
 )
+
+print(f"Original graph: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
+orig_stats = graph_stats(G)
+print(f"Node types: {orig_stats['node_types']}")
+
+# Prune the graph
+G_pruned = prune_graph(G, logits)
+
+print(f"\nPruned graph: {G_pruned.number_of_nodes()} nodes, {G_pruned.number_of_edges()} edges")
+print(f"Node reduction: {G.number_of_nodes() / G_pruned.number_of_nodes():.1f}x")
+print(f"Edge reduction: {G.number_of_edges() / G_pruned.number_of_edges():.1f}x")
+
+pruned_stats = graph_stats(G_pruned)
+print(f"\nPruned node types: {pruned_stats['node_types']}")
+print(f"Pruned edge types: {pruned_stats['edge_types']}")

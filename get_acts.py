@@ -19,6 +19,7 @@ view_dtype = "uint16"
 
 print(f"Loading model {MODEL_NAME} on {device}")
 model = HookedTransformer.from_pretrained(MODEL_NAME, device=device, dtype=dtype)  # type: ignore
+model.cfg.n_ctx = model.cfg.n_ctx // 32
 
 n_layers, d_model = model.cfg.n_layers, model.cfg.d_model
 
@@ -49,7 +50,12 @@ for batch in tqdm(dataloader):
     pre = rearrange(pre, "l b t d -> (b t) l d")
     post = rearrange(post, "l b t d -> (b t) l d")
 
-    out = torch.stack((pre, post), dim=-1).view(getattr(torch, view_dtype)).cpu()
+    out = (
+        torch.stack((pre, post), dim=-1)
+        .to(dtype)
+        .view(getattr(torch, view_dtype))
+        .cpu()
+    )
     if written + n_toks > N_TOKENS:
         n_toks = N_TOKENS - written
         out = out[:n_toks]
