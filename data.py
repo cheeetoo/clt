@@ -15,17 +15,19 @@ class StreamingActivationDataset(IterableDataset):
         batch_size: int,
         n_tokens: int,
         seq_len: int,
-        device: str,
-        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device,
+        dtype: torch.dtype,
     ):
         self.batch_size = batch_size
         self.n_tokens = n_tokens
         self.dtype = dtype
+        self.device = device
 
         # each rank loads its own copy - maybe good maybe not
         self.model = HookedTransformer.from_pretrained(
-            model_name, device=device, dtype=dtype
-        )
+            model_name, device="cpu", dtype=dtype
+        ).to(device)
+
         self.model.cfg.n_ctx = seq_len
         self.n_layers = self.model.cfg.n_layers
         self.d_model = self.model.cfg.d_model
@@ -50,6 +52,7 @@ class StreamingActivationDataset(IterableDataset):
                     break
 
                 toks = self.model.to_tokens(batch["text"], truncate=True)
+                toks = toks.to(self.device)
                 n_toks = toks.shape[0] * toks.shape[1]
 
                 with torch.no_grad():

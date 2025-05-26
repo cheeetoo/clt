@@ -6,8 +6,8 @@ uv run torchrun \
     --nproc_per_node=8 \
     train.py \
     --model_name "Qwen/Qwen2.5-0.5B" \
-    --dataset_name "wikitext" \
-    --dataset_conf "wikitext-103-v1" \
+    --dataset_name "HuggingFaceFW/fineweb" \
+    --dataset_conf "" \
     --n_toks 300000000 \
     --bs 1024 \
     --features 450000 \
