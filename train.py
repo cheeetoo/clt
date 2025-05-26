@@ -7,7 +7,6 @@ import torch
 from torch import Tensor
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
-from torch.utils.data import DataLoader
 from torch.amp.grad_scaler import GradScaler
 from tqdm import tqdm
 
@@ -24,6 +23,7 @@ def init_distributed() -> int:
 
 
 def _all_gather_batch(x: Tensor, world: int) -> Tensor:
+    x = x.contiguous()
     T, *rest = x.shape
     out = x.new_empty(world * T, *rest)
     dist.all_gather_into_tensor(out, x)
@@ -113,7 +113,6 @@ def main(args):
         device,
         torch.bfloat16,
     )
-    loader = DataLoader(dataset, batch_size=1)
 
     model = FeatureParallelCLT(
         dataset.n_layers,
@@ -137,7 +136,7 @@ def main(args):
         pbar = tqdm(total=total_steps, desc="Training", unit="step")
 
     for epoch in range(args.epochs):
-        iter_loader = iter(loader)
+        iter_loader = iter(dataset)
 
         pre_next, post_next = gather_next(iter_loader, stream_gather, world)
         for step in range(len(dataset)):

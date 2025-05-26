@@ -1,12 +1,11 @@
 import torch
 import torch.distributed as dist
-from torch.utils.data import IterableDataset
 from transformer_lens import HookedTransformer
 from datasets import load_dataset
 from einops import rearrange
 
 
-class StreamingActivationDataset(IterableDataset):
+class StreamingActivationDataset:
     def __init__(
         self,
         model_name: str,
