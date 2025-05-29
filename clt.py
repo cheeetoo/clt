@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
 import torch.distributed as dist
+from torch.distributed.nn.functional import all_reduce
 from einops import einsum, reduce, rearrange
 from math import sqrt
 
@@ -129,8 +130,8 @@ class FeatureParallelCLT(nn.Module):
         for i, dec in enumerate(self.d):
             x_hat[:, i:] += dec(acts[:, i])
 
-        handle = dist.all_reduce(x_hat, op=dist.ReduceOp.SUM, async_op=True)
-        handle.wait()  # type: ignore
+        x_hat = x_hat.contiguous()
+        all_reduce(x_hat, op=dist.ReduceOp.SUM)
 
         return h, acts, x_hat
 

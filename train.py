@@ -7,7 +7,6 @@ import torch
 from torch import Tensor
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
-from torch.amp.grad_scaler import GradScaler
 from tqdm import tqdm
 
 from clt import FeatureParallelCLT
@@ -19,6 +18,9 @@ def init_distributed() -> int:
         return dist.get_rank()
     dist.init_process_group("nccl")
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.set_float32_matmul_precision("high")
     return dist.get_rank()
 
 
@@ -63,15 +65,13 @@ def save_single_device(model: FeatureParallelCLT, world, rank, out_path):
         )
 
 
-@torch.compile(mode="max-autotune")
-def train_step(model, pre, post, lambda_s, scaler, optim):
+@torch.compile(mode="max-autotune", fullgraph=True)
+def train_step(model, pre, post, lambda_s, optim):
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
         h, acts, x_hat = model.forward(pre)
         loss = model.get_loss(post, h, x_hat, acts, lambda_s)
-
-        scaler.scale(loss).backward()
-        scaler.step(optim)
-        scaler.update()
+        loss.backward()
+        optim.step()
         optim.zero_grad()
 
     return loss.item()
@@ -124,8 +124,7 @@ def main(args):
         args.c,
     ).to(device)
 
-    scaler = GradScaler()
-    optim = torch.optim.Adam(model.parameters(), lr=args.lr)
+    optim = torch.optim.Adam(model.parameters(), lr=args.lr, fused=True)
 
     stream_gather = torch.cuda.Stream()
 
@@ -148,7 +147,7 @@ def main(args):
             if step < len(dataset) - 1:
                 pre_next, post_next = gather_next(iter_loader, stream_gather, world)
 
-            loss = train_step(model, pre, post, lambda_s, scaler, optim)
+            loss = train_step(model, pre, post, lambda_s, optim)
 
             # Update tqdm and WandB logging
             if rank == 0:
@@ -176,7 +175,6 @@ def main(args):
                 state_dict = {
                     "model": model,
                     "optim": optim,
-                    "scaler": scaler,
                 }
                 cpkt_future = dcp.async_save(
                     state_dict=state_dict, checkpoint_id=str(cpkt_dir)
