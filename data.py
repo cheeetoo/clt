@@ -18,7 +18,7 @@ class StreamingActivationDataset:
         dtype: torch.dtype,
     ):
         self.batch_size = batch_size
-        self.n_tokens = n_tokens
+        self.n_tokens = n_tokens // dist.get_world_size()
         self.dtype = dtype
         self.device = device
 
@@ -52,7 +52,11 @@ class StreamingActivationDataset:
 
                 toks = self.model.to_tokens(batch["text"], truncate=True)
                 toks = toks.to(self.device)
-                n_toks = toks.shape[0] * toks.shape[1]
+                b, s = toks.shape
+                if s < self.model.cfg.n_ctx:
+                    pad = self.model.cfg.n_ctx - s
+                    pad_id = self.model.tokenizer.pad_token_id
+                    toks = F.pad(toks, (0, pad), value=pad_id)
 
                 with torch.no_grad():
                     _, cache = self.model.run_with_cache(
@@ -68,6 +72,6 @@ class StreamingActivationDataset:
                 pre = rearrange(pre, "l b t d -> (b t) l d").to(self.dtype)
                 post = rearrange(post, "l b t d -> (b t) l d").to(self.dtype)
 
-                tokens_processed += n_toks
+                tokens_processed += b * s
 
                 yield pre, post

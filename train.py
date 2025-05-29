@@ -7,6 +7,7 @@ import torch
 from torch import Tensor
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
+from torch.distributed.nn.functional import all_reduce
 from tqdm import tqdm
 
 from clt import FeatureParallelCLT
@@ -65,10 +66,11 @@ def save_single_device(model: FeatureParallelCLT, world, rank, out_path):
         )
 
 
-@torch.compile(mode="max-autotune", fullgraph=True)
 def train_step(model, pre, post, lambda_s, optim):
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
         h, acts, x_hat = model.forward(pre)
+        all_reduce(x_hat, op=dist.ReduceOp.SUM)
+
         loss = model.get_loss(post, h, x_hat, acts, lambda_s)
         loss.backward()
         optim.step()
@@ -123,6 +125,7 @@ def main(args):
         args.lambda_p,
         args.c,
     ).to(device)
+    model = torch.compile(model, mode="max-autotune", fullgraph=True)
 
     optim = torch.optim.Adam(model.parameters(), lr=args.lr, fused=True)
 

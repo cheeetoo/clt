@@ -14,6 +14,7 @@ def rectangle(x: Tensor) -> Tensor:
 class JumpReLU(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x: Tensor, threshold: Tensor, bandwidth: float):
+        threshold = threshold.to(x.dtype)
         ctx.save_for_backward(x, threshold)
         ctx.bandwidth = bandwidth
         return (x * (x > threshold)).type_as(x)
@@ -22,7 +23,7 @@ class JumpReLU(torch.autograd.Function):
     def backward(ctx, grad_output):  # type: ignore
         x, threshold = ctx.saved_tensors
         bandwidth = ctx.bandwidth
-        x_grad = grad_output.clone()
+        x_grad = grad_output
         threshold_grad = (
             -(threshold / bandwidth)
             * rectangle((x - threshold) / bandwidth)
@@ -131,7 +132,6 @@ class FeatureParallelCLT(nn.Module):
             x_hat[:, i:] += dec(acts[:, i])
 
         x_hat = x_hat.contiguous()
-        all_reduce(x_hat, op=dist.ReduceOp.SUM)
 
         return h, acts, x_hat
 

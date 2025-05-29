@@ -9,7 +9,7 @@ uv run torchrun \
     --dataset_name "HuggingFaceFW/fineweb" \
     --dataset_conf "" \
     --n_toks 300000000 \
-    --bs 1024 \
+    --bs 16 \
     --features 450000 \
     --bandwidth 1.0 \
     --threshold 0.03 \
@@ -18,7 +18,7 @@ uv run torchrun \
     --c 0.1 \
     --lr 2e-4 \
     --epochs 1 \
-    --seq_len 256 \
+    --seq_len 128 \
     --out_path "model.pt"
 
 if [ $? -eq 0 ]; then
