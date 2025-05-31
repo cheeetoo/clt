@@ -10,7 +10,7 @@ uv run torchrun \
     --dataset_conf "" \
     --n_toks 300000000 \
     --bs 16 \
-    --features 450000 \
+    --features 450048 \
     --bandwidth 1.0 \
     --threshold 0.03 \
     --lambda_p 3e-6 \

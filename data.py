@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 import torch.distributed as dist
 from transformer_lens import HookedTransformer
 from datasets import load_dataset
@@ -26,10 +27,11 @@ class StreamingActivationDataset:
         self.model = HookedTransformer.from_pretrained(
             model_name, device="cpu", dtype=dtype
         ).to(device)
+        self.model.eval()
 
         self.model.cfg.n_ctx = seq_len
-        self.n_layers = self.model.cfg.n_layers
-        self.d_model = self.model.cfg.d_model
+        self.n_layers: int = self.model.cfg.n_layers  # type: ignore
+        self.d_model: int = self.model.cfg.d_model  # type: ignore
 
         dataset = (
             load_dataset(dataset_name, dataset_conf, split="train", streaming=True)
@@ -37,10 +39,34 @@ class StreamingActivationDataset:
             .filter(lambda ex: ex["text"].strip() != "")
         )
 
-        self.dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size)
+        self.dataloader = torch.utils.data.DataLoader(
+            dataset,
+            batch_size=batch_size,
+            num_workers=8,
+            pin_memory=True,
+            prefetch_factor=4,
+        )
 
     def __len__(self):
         return self.n_tokens // self.batch_size
+
+    def _get_acts(self, toks):
+        with torch.autocast("cuda", dtype=self.dtype):
+            with torch.inference_mode():
+                _, cache = self.model.run_with_cache(
+                    toks,
+                    names_filter=lambda n: n.endswith("normalized")
+                    or n.endswith("mlp_out"),
+                )
+
+            pre = torch.stack(
+                [cache["normalized", i, "ln2"] for i in range(self.n_layers)]
+            )
+            post = torch.stack([cache["mlp_out", i] for i in range(self.n_layers)])
+            pre = rearrange(pre, "l b t d -> (b t) l d")
+            post = rearrange(post, "l b t d -> (b t) l d")
+
+        return pre, post
 
     def __iter__(self):
         tokens_processed = 0
@@ -58,20 +84,8 @@ class StreamingActivationDataset:
                     pad_id = self.model.tokenizer.pad_token_id
                     toks = F.pad(toks, (0, pad), value=pad_id)
 
-                with torch.no_grad():
-                    _, cache = self.model.run_with_cache(
-                        toks,
-                        names_filter=lambda n: n.endswith("normalized")
-                        or n.endswith("mlp_out"),
-                    )
-
-                pre = torch.stack(
-                    [cache["normalized", i, "ln2"] for i in range(self.n_layers)]
-                )
-                post = torch.stack([cache["mlp_out", i] for i in range(self.n_layers)])
-                pre = rearrange(pre, "l b t d -> (b t) l d").to(self.dtype)
-                post = rearrange(post, "l b t d -> (b t) l d").to(self.dtype)
-
                 tokens_processed += b * s
+
+                pre, post = self._get_acts(toks)
 
                 yield pre, post
