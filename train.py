@@ -17,7 +17,7 @@ from data import StreamingActivationDataset
 def init_distributed() -> int:
     if dist.is_initialized():
         return dist.get_rank()
-    dist.init_process_group("nccl")
+    dist.init_process_group("cpu:gloo,cuda:nccl")
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -110,7 +110,7 @@ def main(args):
         args.dataset_name,
         args.dataset_conf,
         args.bs,
-        args.n_toks // world,
+        args.n_toks,
         args.seq_len,
         device,
         torch.bfloat16,
@@ -156,10 +156,10 @@ def main(args):
             if rank == 0:
                 pbar.update(1)
                 pbar.set_postfix({"epoch": epoch + 1, "step": step + 1})
-                if step % 100 == 0:
+                if step % 10 == 0:
                     wandb.log(
                         {
-                            "loss": loss.item(),
+                            "loss": loss.detach().item(),
                             "lambda_s": lambda_s,
                             "epoch": epoch,
                             "step": step,
@@ -168,7 +168,7 @@ def main(args):
                         }
                     )
 
-            if step % 10_000 == 0 and step != 0:
+            if step % 1_000 == 0 and step != 0:
                 if cpkt_future:
                     cpkt_future.result()
                 cpkt_dir = Path("checkpoints") / f"ep{epoch:04d}s{step:05d}"
@@ -195,7 +195,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-0.5B")
+    parser.add_argument("--model_name", type=str)
     parser.add_argument("--dataset_name", type=str)
     parser.add_argument("--dataset_conf", type=str)
     parser.add_argument("--n_toks", type=int)

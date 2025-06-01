@@ -20,6 +20,7 @@ class StreamingActivationDataset:
     ):
         self.batch_size = batch_size
         self.n_tokens = n_tokens // dist.get_world_size()
+        self.seq_len = seq_len
         self.dtype = dtype
         self.device = device
 
@@ -48,7 +49,7 @@ class StreamingActivationDataset:
         )
 
     def __len__(self):
-        return self.n_tokens // self.batch_size
+        return self.n_tokens // (self.batch_size * self.seq_len)
 
     def _get_acts(self, toks):
         with torch.inference_mode():

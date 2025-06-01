@@ -1,5 +1,7 @@
 #!/bin/bash
 
+export TOKENIZERS_PARALLELISM=false
+
 uv run torchrun \
     --standalone \
     --nnodes=1 \
@@ -9,7 +11,7 @@ uv run torchrun \
     --dataset_name "HuggingFaceFW/fineweb" \
     --dataset_conf "" \
     --n_toks 300000000 \
-    --bs 16 \
+    --bs 24 \
     --features 450048 \
     --bandwidth 1.0 \
     --threshold 0.03 \
