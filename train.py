@@ -8,6 +8,7 @@ from torch import Tensor
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from torch.distributed.nn.functional import all_reduce
+from torch.profiler import profile, ProfilerActivity, schedule, record_function
 from tqdm import tqdm
 
 from clt import FeatureParallelCLT
@@ -34,10 +35,12 @@ def _all_gather_batch(x: Tensor, world: int) -> Tensor:
 
 
 def gather_next(iter_loader, stream, world) -> tuple[Tensor, Tensor]:
-    pre, post = next(iter_loader)
+    with record_function("data_loading"):
+        pre, post = next(iter_loader)
     with torch.cuda.stream(stream):
-        pre_super = _all_gather_batch(pre, world)
-        post_super = _all_gather_batch(post, world)
+        with record_function("all_gather"):
+            pre_super = _all_gather_batch(pre, world)
+            post_super = _all_gather_batch(post, world)
 
     return pre_super, post_super
 
@@ -68,13 +71,18 @@ def save_single_device(model: FeatureParallelCLT, world, rank, out_path):
 
 def train_step(model, pre, post, lambda_s, optim):
     with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-        h, acts, x_hat = model.forward(pre)
-        all_reduce(x_hat, op=dist.ReduceOp.SUM)
+        with record_function("forward"):
+            h, acts, x_hat = model.forward(pre)
+        with record_function("all_reduce"):
+            all_reduce(x_hat, op=dist.ReduceOp.SUM)
 
-        loss = model.get_loss(post, h, x_hat, acts, lambda_s)
-        loss.backward()
-        optim.step()
-        optim.zero_grad()
+        with record_function("loss_computation"):
+            loss = model.get_loss(post, h, x_hat, acts, lambda_s)
+        with record_function("backward"):
+            loss.backward()
+        with record_function("optimizer_step"):
+            optim.step()
+            optim.zero_grad()
 
     return loss.item()
 
@@ -83,6 +91,31 @@ def main(args):
     rank = init_distributed()
     world = dist.get_world_size()
     device = torch.device("cuda", rank)
+
+    # Setup profiler - only profile on rank 0 to avoid memory issues
+    if rank == 0:
+
+        def trace_handler(p):
+            try:
+                trace_path = f"./profile_traces/rank{rank}_trace.json"
+                os.makedirs("./profile_traces", exist_ok=True)
+                p.export_chrome_trace(trace_path)
+                print(f"Trace saved to {trace_path}")
+            except Exception as e:
+                print(f"Failed to save trace: {e}")
+
+        prof = profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            schedule=schedule(wait=10, warmup=10, active=20, repeat=1),
+            on_trace_ready=trace_handler,
+            record_shapes=True,
+            profile_memory=False,  # Disable memory profiling to reduce overhead
+            with_stack=False,  # Disable stack traces to reduce memory
+            with_flops=True,
+        )
+        prof.start()
+    else:
+        prof = None
 
     if rank == 0:
         wandb.init(
@@ -142,15 +175,23 @@ def main(args):
 
         pre_next, post_next = gather_next(iter_loader, stream_gather, world)
         for step in range(len(dataset)):
-            torch.cuda.current_stream().wait_stream(stream_gather)
-            global_step = step + epoch * len(dataset)
-            lambda_s = args.lambda_s * global_step / total_steps
+            with record_function(f"training_step_{step}"):
+                with record_function("stream_sync"):
+                    torch.cuda.current_stream().wait_stream(stream_gather)
+                global_step = step + epoch * len(dataset)
+                lambda_s = args.lambda_s * global_step / total_steps
 
-            pre, post = pre_next, post_next
-            if step < len(dataset) - 1:
-                pre_next, post_next = gather_next(iter_loader, stream_gather, world)
+                pre, post = pre_next, post_next
+                if step < len(dataset) - 1:
+                    with record_function("prefetch_next_batch"):
+                        pre_next, post_next = gather_next(
+                            iter_loader, stream_gather, world
+                        )
 
-            loss = train_step(model, pre, post, lambda_s, optim)
+                loss = train_step(model, pre, post, lambda_s, optim)
+
+            if prof is not None:
+                prof.step()
 
             # Update tqdm and WandB logging
             if rank == 0:
@@ -183,6 +224,9 @@ def main(args):
                     state_dict=state_dict, checkpoint_id=str(cpkt_dir)
                 )
 
+    if prof is not None:
+        prof.stop()
+
     if cpkt_future:
         cpkt_future.result()
     save_single_device(model, world, rank, args.out_path)
@@ -193,6 +237,9 @@ def main(args):
     if rank == 0:
         pbar.close()
         wandb.finish()
+        print(f"\nProfile traces saved to ./profile_traces/")
+        print("View with Perfetto: https://ui.perfetto.dev")
+        print("Then drag and drop the rankN_trace.json files")
 
 
 if __name__ == "__main__":
