@@ -69,22 +69,17 @@ def save_single_device(model: FeatureParallelCLT, world, rank, out_path):
         )
 
 
+@torch.compile(mode="max-autotune")
 def train_step(model, pre, post, lambda_s, optim):
-    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-        with record_function("forward"):
-            h, acts, x_hat = model.forward(pre)
-        with record_function("all_reduce"):
-            all_reduce(x_hat, op=dist.ReduceOp.SUM)
+    h, acts, x_hat = model.forward(pre)
+    all_reduce(x_hat, op=dist.ReduceOp.SUM)
 
-        with record_function("loss_computation"):
-            loss = model.get_loss(post, h, x_hat, acts, lambda_s)
-        with record_function("backward"):
-            loss.backward()
-        with record_function("optimizer_step"):
-            optim.step()
-            optim.zero_grad()
+    loss = model.get_loss(post, h, x_hat, acts, lambda_s)
+    loss.backward()
+    optim.step()
+    optim.zero_grad()
 
-    return loss.item()
+    return loss
 
 
 def main(args):
@@ -158,7 +153,6 @@ def main(args):
         args.lambda_p,
         args.c,
     ).to(device)
-    model = torch.compile(model, mode="max-autotune", fullgraph=True)
 
     optim = torch.optim.Adam(model.parameters(), lr=args.lr, fused=True)
 
@@ -188,14 +182,16 @@ def main(args):
                             iter_loader, stream_gather, world
                         )
 
-                loss = train_step(model, pre, post, lambda_s, optim)
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    loss = train_step(model, pre, post, lambda_s, optim)
 
             if prof is not None:
                 prof.step()
 
             # Update tqdm and WandB logging
-            if rank == 0:
-                pbar.update(1)
+            if rank == 0 and step % 100 == 0 and step != 0:
+                loss = loss.item()
+                pbar.update(100)
                 pbar.set_postfix(
                     {"epoch": epoch + 1, "step": step + 1, "loss": f"{loss:.4f}"}
                 )
