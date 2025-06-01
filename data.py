@@ -51,20 +51,17 @@ class StreamingActivationDataset:
         return self.n_tokens // self.batch_size
 
     def _get_acts(self, toks):
-        with torch.autocast("cuda", dtype=self.dtype):
-            with torch.inference_mode():
-                _, cache = self.model.run_with_cache(
-                    toks,
-                    names_filter=lambda n: n.endswith("normalized")
-                    or n.endswith("mlp_out"),
-                )
-
-            pre = torch.stack(
-                [cache["normalized", i, "ln2"] for i in range(self.n_layers)]
+        with torch.inference_mode():
+            _, cache = self.model.run_with_cache(
+                toks,
+                names_filter=lambda n: n.endswith("normalized")
+                or n.endswith("mlp_out"),
             )
-            post = torch.stack([cache["mlp_out", i] for i in range(self.n_layers)])
-            pre = rearrange(pre, "l b t d -> (b t) l d")
-            post = rearrange(post, "l b t d -> (b t) l d")
+
+        pre = torch.stack([cache["normalized", i, "ln2"] for i in range(self.n_layers)])
+        post = torch.stack([cache["mlp_out", i] for i in range(self.n_layers)])
+        pre = rearrange(pre, "l b t d -> (b t) l d")
+        post = rearrange(post, "l b t d -> (b t) l d")
 
         return pre, post
 
@@ -86,6 +83,7 @@ class StreamingActivationDataset:
 
                 tokens_processed += b * s
 
-                pre, post = self._get_acts(toks)
+                with torch.autocast("cuda", dtype=self.dtype):
+                    pre, post = self._get_acts(toks)
 
                 yield pre, post

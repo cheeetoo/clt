@@ -76,7 +76,7 @@ def train_step(model, pre, post, lambda_s, optim):
         optim.step()
         optim.zero_grad()
 
-    return loss.item()
+    return loss
 
 
 def main(args):
@@ -155,13 +155,11 @@ def main(args):
             # Update tqdm and WandB logging
             if rank == 0:
                 pbar.update(1)
-                pbar.set_postfix(
-                    {"epoch": epoch + 1, "step": step + 1, "loss": f"{loss:.4f}"}
-                )
+                pbar.set_postfix({"epoch": epoch + 1, "step": step + 1})
                 if step % 100 == 0:
                     wandb.log(
                         {
-                            "loss": loss,
+                            "loss": loss.item(),
                             "lambda_s": lambda_s,
                             "epoch": epoch,
                             "step": step,

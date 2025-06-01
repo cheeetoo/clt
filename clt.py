@@ -135,6 +135,7 @@ class FeatureParallelCLT(nn.Module):
 
         return h, acts, x_hat
 
+    @torch.compile
     def get_loss(
         self, x: Tensor, h: Tensor, x_hat: Tensor, acts: Tensor, lambda_s: float
     ) -> Tensor:
@@ -142,11 +143,8 @@ class FeatureParallelCLT(nn.Module):
         l_p = self.lambda_p * F.relu(-h)
         l_p = reduce(l_p, "t l f -> t l", "sum").mean()
 
-        l_s = 0
-        for i, dec in enumerate(self.d):
-            w_flat = rearrange(dec.w, "l f d -> f (l d)")
-            w_norm = torch.norm(w_flat, dim=-1)
-
-            l_s += torch.tanh(self.c * w_norm * acts[:, i]).sum()
+        get_norm = lambda dec: torch.norm(rearrange(dec.w, "l f d -> f (l d)"), dim=-1)
+        w_norm = torch.stack([get_norm(dec) for dec in self.d], dim=0)
+        l_s = torch.tanh(self.c * w_norm * acts).sum()
 
         return l_mse + l_p + lambda_s * l_s
