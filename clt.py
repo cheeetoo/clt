@@ -142,8 +142,11 @@ class FeatureParallelCLT(nn.Module):
         l_p = self.lambda_p * F.relu(-h)
         l_p = reduce(l_p, "t l f -> t l", "sum").mean()
 
-        w_stacked = torch.stack([rearrange(d.w, "l f d -> f (l d)") for d in self.d])
-        w_norm = torch.norm(w_stacked, dim=-1)
-        l_s = torch.tanh(self.c * w_norm * acts).sum()
+        l_s = 0
+        for i, dec in enumerate(self.d):
+            w_flat = rearrange(dec.w, "l f d -> f (l d)")
+            w_norm = torch.norm(w_flat, dim=-1)
+
+            l_s += torch.tanh(self.c * w_norm * acts[:, i]).sum()
 
         return l_mse + l_p + lambda_s * l_s

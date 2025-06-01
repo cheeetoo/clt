@@ -1,28 +1,9 @@
 import torch
-from torch import Tensor
 import torch.nn.functional as F
 import torch.distributed as dist
-from torch.profiler import record_function
 from transformer_lens import HookedTransformer
 from datasets import load_dataset
 from einops import rearrange
-
-
-@torch.compile(mode="max-autotune")
-def _get_acts(
-    model: HookedTransformer, toks: Tensor, n_layers: int, dtype: torch.dtype
-):
-    _, cache = model.run_with_cache(
-        toks,
-        names_filter=lambda n: n.endswith("normalized") or n.endswith("mlp_out"),
-    )
-
-    pre = torch.stack([cache["normalized", i, "ln2"] for i in range(n_layers)])
-    post = torch.stack([cache["mlp_out", i] for i in range(n_layers)])
-    pre = rearrange(pre, "l b t d -> (b t) l d")
-    post = rearrange(post, "l b t d -> (b t) l d")
-
-    return pre, post
 
 
 class StreamingActivationDataset:
@@ -69,6 +50,24 @@ class StreamingActivationDataset:
     def __len__(self):
         return self.n_tokens // self.batch_size
 
+    def _get_acts(self, toks):
+        with torch.autocast("cuda", dtype=self.dtype):
+            with torch.inference_mode():
+                _, cache = self.model.run_with_cache(
+                    toks,
+                    names_filter=lambda n: n.endswith("normalized")
+                    or n.endswith("mlp_out"),
+                )
+
+            pre = torch.stack(
+                [cache["normalized", i, "ln2"] for i in range(self.n_layers)]
+            )
+            post = torch.stack([cache["mlp_out", i] for i in range(self.n_layers)])
+            pre = rearrange(pre, "l b t d -> (b t) l d")
+            post = rearrange(post, "l b t d -> (b t) l d")
+
+        return pre, post
+
     def __iter__(self):
         tokens_processed = 0
 
@@ -78,7 +77,7 @@ class StreamingActivationDataset:
                     break
 
                 toks = self.model.to_tokens(batch["text"], truncate=True)
-                toks = toks.to(self.device)
+                toks = toks.to(self.device, non_blocking=True)
                 b, s = toks.shape
                 if s < self.model.cfg.n_ctx:
                     pad = self.model.cfg.n_ctx - s
@@ -87,11 +86,6 @@ class StreamingActivationDataset:
 
                 tokens_processed += b * s
 
-                with record_function("get_acts"):
-                    with torch.inference_mode():
-                        with torch.autocast("cuda", dtype=dtype):
-                            pre, post = _get_acts(
-                                self.model, toks, self.n_layers, self.dtype
-                            )  # type: ignore
+                pre, post = self._get_acts(toks)
 
                 yield pre, post
