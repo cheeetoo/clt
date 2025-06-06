@@ -93,7 +93,7 @@ def main(args):
                 "dataset_conf": args.dataset_conf,
                 "n_toks": args.n_toks,
                 "batch_size": args.bs,
-                "features": args.features,
+                "n_features": args.n_features,
                 "bandwidth": args.bandwidth,
                 "threshold": args.threshold,
                 "lambda_p": args.lambda_p,
@@ -119,7 +119,7 @@ def main(args):
     model = FeatureParallelCLT(
         dataset.n_layers,
         dataset.d_model,
-        args.features,
+        args.n_features,
         args.bandwidth,
         args.threshold,
         args.lambda_p,
@@ -197,10 +197,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", type=str)
     parser.add_argument("--dataset_name", type=str)
-    parser.add_argument("--dataset_conf", type=str)
+    parser.add_argument("--dataset_conf", type=str, default="")
     parser.add_argument("--n_toks", type=int)
     parser.add_argument("--bs", type=int)
-    parser.add_argument("--features", type=int)
+    parser.add_argument("--n_features", type=int)
     parser.add_argument("--bandwidth", type=float, default=1.0)
     parser.add_argument("--threshold", type=float, default=0.03)
     parser.add_argument("--lambda_p", type=float, default=3e-6)

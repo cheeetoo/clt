@@ -3,8 +3,6 @@
 export TOKENIZERS_PARALLELISM=false
 
 uv run torchrun \
-    --standalone \
-    --nnodes=1 \
     --nproc_per_node=8 \
     train.py \
     --model_name "Qwen/Qwen2.5-0.5B" \
@@ -12,7 +10,7 @@ uv run torchrun \
     --dataset_conf "" \
     --n_toks 300000000 \
     --bs 24 \
-    --features 450048 \
+    --n_features 450048 \
     --bandwidth 1.0 \
     --threshold 0.03 \
     --lambda_p 3e-6 \
